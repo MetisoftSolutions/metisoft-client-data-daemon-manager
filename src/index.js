@@ -84,14 +84,33 @@ window.MetisoftSolutions.clientDataDaemonManager = window.MetisoftSolutions.clie
    *    (For timer-based daemons.) Calls the web service. Data returned will be
    *    broadcast to `listeners`.
    *
-   * @property {Object} eventTriggers
-   *    (For event-based daemons.) Keys are event names. The value is the function
-   *    to be called when that event fires.
+   * @property {Function} fnGetArgs
+   *    (For timer-based daemons.) Optional. Retrieves the arguments object to
+   *    pass in to when calling `fnGetData`. Can be left unspecified if no arguments
+   *    are necessary.
    *
    * @property {Object} intervalsMs
    *    (For timer-based daemons.) Keys are possible values of `status`. Values
    *    are for how long, in milliseconds, the daemon's interval should be for
    *    the given status.
+   *
+   * @property {Object.<String, module:metisoftClientDataDaemonManager~EventHandlerConfig>} eventTriggers
+   *    (For event-based daemons.) Keys are event names.
+   */
+
+  /**
+   * @typedef EventHandlerConfig
+   * @type Object
+   *
+   * @property {Function} fnGetData
+   *    Function to retrieve data from the server.
+   *
+   * @property {Function?} fnGetArgs
+   *    Function to retrieve an arguments object to pass into `fnGetData`,
+   *    if arguments are necessary.
+   *
+   * @property {Number?} throttleTimeMs
+   *    The minimum number of milliseconds between calls to `fnGetData`.
    */
 
   /**
@@ -101,7 +120,57 @@ window.MetisoftSolutions.clientDataDaemonManager = window.MetisoftSolutions.clie
    * @param {module:metisoftClientDataDaemonManager~DaemonConfig} config
    */
   DataDaemonManager.prototype.addDaemon = function addDaemon(config) {
-    this.__daemonConfigs[config.name] = _.cloneDeep(config);
+    var configCopy = _.cloneDeep(config);
+
+    if (configCopy.fnGetData) {
+      configCopy.fnGetData = this.__makeDataHandler(configCopy.fnGetData);
+    }
+
+    if (configCopy.eventTriggers) {
+      this.__setUpEventTriggers(configCopy);
+    }
+
+    this.__daemonConfigs[config.name] = _.cloneDeep(configCopy);
+  };
+
+
+
+  /**
+   * If `config` provides `eventTriggers`, this function goes through each handler function
+   * and adds layers to it to:
+   *   1. Store and broadcast returned data.
+   *   2. Add a throttler, if specified.
+   *
+   * @private
+   * @param {module:metisoftClientDataDaemonManager~DaemonConfig} config
+   */
+  DataDaemonManager.prototype.__setUpEventTriggers = function __setUpEventTriggers(config) {
+    var self = this;
+
+    _.forEach(config.eventTriggers, function(eventHandlerConfig, eventName) {
+      var throttleTimeMs = eventHandlerConfig.throttleTimeMs,
+          fnGetDataHandler = self.__makeDataHandler(eventHandlerConfig.fnGetData);
+      
+      if (_.isNumber(throttleTimeMs) && throttleTimeMs > 0) {
+        eventHandlerConfig.__lastUpdateTimestamp = null;
+        eventHandlerConfig.fnGetData = (function(config, event, args) {
+
+            var now = new Date();
+
+            // use of 'this' rather than 'self' is intentional here, because we want to refer
+            // to the `eventHandlerConfig` object and not the `DataDaemonManager` instance
+            if (this.__lastUpdateTimestamp === null ||
+                now.getTime() - this.__lastUpdateTimestamp.getTime() > this.throttleTimeMs) {
+              this.__lastUpdateTimestamp = new Date();
+              return fnGetDataHandler(config, args);
+            }
+
+          }).bind(eventHandlerConfig);
+      
+      } else {
+        eventHandlerConfig.fnGetData = fnGetDataHandler; 
+      }
+    });
   };
 
 
@@ -221,9 +290,14 @@ window.MetisoftSolutions.clientDataDaemonManager = window.MetisoftSolutions.clie
    * @throws {Error} If the named service doesn't exist.
    */
   DataDaemonManager.prototype.forceGetData = function forceGetData(daemonName) {
-    var daemonConfig = this.__getDaemonConfig(daemonName);
+    var daemonConfig = this.__getDaemonConfig(daemonName),
+        args;
 
-    return daemonConfig.fnGetData(daemonConfig);
+    if (daemonConfig.fnGetArgs && _.isFunction(daemonConfig.fnGetArgs)) {
+      args = daemonConfig.fnGetArgs();
+    }
+
+    return daemonConfig.fnGetData(daemonConfig, args);
   };
 
 
@@ -299,7 +373,16 @@ window.MetisoftSolutions.clientDataDaemonManager = window.MetisoftSolutions.clie
       throw new Error("No interval set for " + config.name);
     }
 
-    config.__daemon = this.__fnStartInterval(_.partial(config.fnGetData, config), config.intervalsMs[config.status]);
+    config.__daemon = this.__fnStartInterval(function() {
+        var args;
+
+        if (config.fnGetArgs && _.isFunction(config.fnGetArgs)) {
+          args = config.fnGetArgs();
+        }
+
+        config.fnGetData(config, args);
+      }, config.intervalsMs[config.status]);
+
     return config;
   };
 
@@ -310,7 +393,7 @@ window.MetisoftSolutions.clientDataDaemonManager = window.MetisoftSolutions.clie
    * @param {module:metisoftClientDataDaemonManager~DaemonConfig} config
    */
   DataDaemonManager.prototype.__stopTimerDaemon = function __stopTimerDaemon(config) {
-    if (config.__daemon !== null) {
+    if (!!config.__daemon) {
       this.__fnStopInterval(config.__daemon);
       config.__daemon = null;
     }
@@ -327,9 +410,9 @@ window.MetisoftSolutions.clientDataDaemonManager = window.MetisoftSolutions.clie
 
     config.__deregistrationFunctions = config.__deregistrationFunctions || [];
 
-    _.forEach(config.eventTriggers, function(fnHandler, eventName) {
+    _.forEach(config.eventTriggers, function(eventHandlerConfig, eventName) {
       config.__deregistrationFunctions.push(
-        self.__fnSubscribeToEvent(eventName, _.partial(fnHandler, config))
+        self.__fnSubscribeToEvent(eventName, _.partial(eventHandlerConfig.fnGetData, config))
       );
     });
   };
@@ -360,6 +443,42 @@ window.MetisoftSolutions.clientDataDaemonManager = window.MetisoftSolutions.clie
       var clonedData = _.cloneDeep(data);
       fnListener(clonedData);
     });
+  };
+
+
+
+  /**
+   * @callback __dataHandler
+   * @param {module:metisoftClientDataDaemonManager~DaemonConfig} config
+   *
+   * @param {Object} args
+   *    Arguments to pass to the service endpoint.
+   *
+   * @returns {Promise<Any>}
+   *    The data returned from the service call.
+   */
+
+  /**
+   * This function creates as function that will call `fnGetData` and act on its returned
+   * `Promise`. With the data returned, it will cache the data, broadcast it to all listeners,
+   * and return it.
+   *
+   * @private
+   * @param {Function} fnGetData
+   * @returns {module:metisoftClientDataDaemonManager~__dataHandler}
+   */
+  DataDaemonManager.prototype.__makeDataHandler = function __makeDataHandler(fnGetData) {
+    var self = this;
+
+    return function __dataHandler(config, args) {
+      return fnGetData(args)
+
+        .then(function(dbData) {
+          config.__data = dbData;
+          self.__broadcastData(config.listeners.getListeners(), config.__data);
+          return config.__data;
+        });
+    };
   };
 
 
