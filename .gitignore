@@ -1,0 +1,5 @@
+doc/jsdoc/**
+node_modules/**
+bower_components/**
+typings/**
+typings.json

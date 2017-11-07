@@ -1,0 +1,16 @@
+{
+  "name": "metisoft-client-data-daemon-manager",
+  "version": "0.0.1",
+  "description": "Metisoft, LLC - Client side manager for daemons that periodically retrieve data from an app server",
+  "main": "src/index.js",
+  "author": "James Brawn, Jr.",
+  "license": "MIT",
+  "scripts": {
+    "genDocs": "jsdoc src/ -p -r --verbose -t node_modules/minami -d doc/jsdoc -c doc/conf.json",
+    "test": "mocha"
+  },
+  "devDependencies": {
+    "jsdoc": "^3.4.3",
+    "minami": "^1.1.1"
+  }
+}
